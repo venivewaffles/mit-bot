@@ -10,7 +10,8 @@ class GameRegistrationManager:
         self.logger = logging.getLogger(__name__)
     
     async def show_games_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показ списка доступных игр"""
+        """Показ списка доступных игр (только опубликованных)"""
+        # Получаем только опубликованные игры
         games = self.db.get_active_games()
         
         if not games:
@@ -20,6 +21,10 @@ class GameRegistrationManager:
         text = "🎮 ДОСТУПНЫЕ ИГРЫ:\n\n"
         
         for game in games:
+            # Дополнительная проверка, что игра опубликована
+            if not game.is_published:
+                continue
+                
             registrations = self.db.get_game_registrations(game.id)
             main_players = [r for r in registrations if not r.is_reserve]
             reserve_players = [r for r in registrations if r.is_reserve]
@@ -29,6 +34,7 @@ class GameRegistrationManager:
             text += f"🏆 {game.title}\n"
             text += f"📅 {formatted_date}\n"
             text += f"📍 {game.location}\n"
+            text += f"🎯 Ведущий: {game.host or 'Не указан'}\n"
             text += f"👥 {len(main_players)}/{game.max_players} игроков"
             
             if reserve_players:
@@ -59,23 +65,7 @@ class GameRegistrationManager:
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             text = ""  # Сбрасываем для следующего сообщения
-    
-    async def handle_registration_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка callback'ов записи/отписки"""
-        query = update.callback_query
-        await query.answer()
-        
-        user_id = query.from_user.id
-        data = query.data
-        
-        if data.startswith('join_'):
-            game_id = int(data.split('_')[1])
-            await self._join_game(query, game_id, user_id)
-        
-        elif data.startswith('leave_'):
-            game_id = int(data.split('_')[1])
-            await self._leave_game(query, game_id, user_id)
-    
+
     async def _join_game(self, query, game_id, user_id):
         """Запись на игру с обновлением анонса в канале"""
         self.logger.info(f"Пользователь {user_id} записывается на игру {game_id}")
@@ -85,8 +75,18 @@ class GameRegistrationManager:
         if not user or not user.registration_complete:
             await query.edit_message_text(
                 "❌ Сначала нужно завершить регистрацию!\n"
-                "Используйте /start для регистрации."
+                "Используйте /registrate для регистрации."
             )
+            return
+        
+        # Проверяем, существует ли игра и опубликована ли она
+        game = self.db.get_game_by_id(game_id)
+        if not game:
+            await query.edit_message_text("❌ Игра не найдена!")
+            return
+        
+        if not game.is_published:
+            await query.edit_message_text("❌ Эта игра еще не опубликована!")
             return
         
         # Записываем на игру
@@ -98,16 +98,16 @@ class GameRegistrationManager:
         
         self.logger.info(f"Пользователь {user_id} успешно записан на игру {game_id}")
         
-        # Обновляем анонс в канале
-        try:
-            self.logger.info(f"Начинаем обновление анонса для игры {game_id}")
-            await self.announcement_manager.update_channel_announcement(game_id)
-            self.logger.info(f"Анонс для игры {game_id} обновлен")
-        except Exception as e:
-            self.logger.error(f"⚠️ Ошибка при обновлении анонса: {e}")
+        # Обновляем анонс в канале только если игра опубликована
+        if game.is_published and game.channel_message_id:
+            try:
+                self.logger.info(f"Начинаем обновление анонса для игры {game_id}")
+                await self.announcement_manager.update_channel_announcement(game_id)
+                self.logger.info(f"Анонс для игры {game_id} обновлен")
+            except Exception as e:
+                self.logger.error(f"⚠️ Ошибка при обновлении анонса: {e}")
         
         # Формируем ответ
-        game = self.db.get_game_by_id(game_id)
         registrations = self.db.get_game_registrations(game_id)
         main_players = [r for r in registrations if not r.is_reserve]
         
@@ -136,6 +136,12 @@ class GameRegistrationManager:
         """Отписка от игры с обновлением анонса в канале"""
         self.logger.info(f"Пользователь {user_id} отписывается от игры {game_id}")
         
+        # Проверяем, существует ли игра и опубликована ли она
+        game = self.db.get_game_by_id(game_id)
+        if not game:
+            await query.edit_message_text("❌ Игра не найдена!")
+            return
+        
         success = self.db.unregister_from_game(game_id, user_id)
         
         if not success:
@@ -144,15 +150,15 @@ class GameRegistrationManager:
         
         self.logger.info(f"Пользователь {user_id} успешно отписан от игры {game_id}")
         
-        # Обновляем анонс в канале
-        try:
-            self.logger.info(f"Начинаем обновление анонса для игры {game_id}")
-            await self.announcement_manager.update_channel_announcement(game_id)
-            self.logger.info(f"Анонс для игры {game_id} обновлен")
-        except Exception as e:
-            self.logger.error(f"⚠️ Ошибка при обновлении анонса: {e}")
+        # Обновляем анонс в канале только если игра опубликована
+        if game.is_published and game.channel_message_id:
+            try:
+                self.logger.info(f"Начинаем обновление анонса для игры {game_id}")
+                await self.announcement_manager.update_channel_announcement(game_id)
+                self.logger.info(f"Анонс для игры {game_id} обновлен")
+            except Exception as e:
+                self.logger.error(f"⚠️ Ошибка при обновлении анонса: {e}")
         
-        game = self.db.get_game_by_id(game_id)
         response = (
             f"🚫 Вы отписались от игры:\n"
             f"🏆 {game.title}\n"
@@ -162,3 +168,19 @@ class GameRegistrationManager:
         )
         
         await query.edit_message_text(response)
+    
+    async def handle_registration_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка callback'ов записи/отписки"""
+        query = update.callback_query
+        await query.answer()
+        
+        user_id = query.from_user.id
+        data = query.data
+        
+        if data.startswith('join_'):
+            game_id = int(data.split('_')[1])
+            await self._join_game(query, game_id, user_id)
+        
+        elif data.startswith('leave_'):
+            game_id = int(data.split('_')[1])
+            await self._leave_game(query, game_id, user_id)

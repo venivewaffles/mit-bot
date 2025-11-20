@@ -18,63 +18,46 @@ class RegistrationManager:
         self.logger = logging.getLogger(__name__)
 
     async def start_registration(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Начало регистрации или редактирования"""
-        user = update.effective_user
+        """Начало регистрации (заменяет /start)"""
+        user_id = update.effective_user.id
+        user = self.db.get_user(user_id)
         
-        # Проверяем, есть ли пользователь в базе и завершена ли регистрация
-        existing_user = self.db.get_user(user.id)
+        # Проверяем, не является ли это редактированием
+        is_editing = context.user_data.get('is_editing', False)
         
-        # Проверяем, есть ли предзаполненные данные для редактирования
-        is_editing = 'registration' in context.user_data and context.user_data['registration'].get('user_id') == user.id
+        if not is_editing:
+            # Если пользователь уже зарегистрирован и это не редактирование
+            if user and user.registration_complete:
+                await update.message.reply_text(
+                    "✅ Вы уже зарегистрированы!\n"
+                    "Для редактирования профиля используйте команду /edit"
+                )
+                return ConversationHandler.END
         
-        if existing_user and existing_user.registration_complete and not is_editing:
-            # Пользователь уже зарегистрирован - предлагаем редактирование
+        # Очищаем предыдущие данные регистрации
+        context.user_data.pop('registration', None)
+        
+        # Начинаем процесс регистрации
+        if is_editing:
             await update.message.reply_text(
-                "📝 Вы уже зарегистрированы! Хотите отредактировать профиль?",
-                reply_markup=ReplyKeyboardMarkup([
-                    ["✅ Да, редактировать", "❌ Нет, оставить как есть"]
-                ], one_time_keyboard=True)
+                "✏️ РЕДАКТИРОВАНИЕ ПРОФИЛЯ\n\n"
+                "Вы можете изменить данные вашего профиля.\n"
+                "➖➖➖➖➖➖➖➖➖➖\n"
+                "🎯 Введите ваше настоящее имя:",
+                reply_markup=ReplyKeyboardRemove()
             )
-            return RegistrationState.CONFIRM
         else:
-            # Начинаем новую регистрацию или редактирование
-            if is_editing:
-                # Редактирование - показываем текущие значения
-                current_data = context.user_data['registration']
-                await update.message.reply_text(
-                    "✏️ РЕДАКТИРОВАНИЕ ПРОФИЛЯ\n\n"
-                    "Вы можете изменить данные вашего профиля.\n"
-                    "➖➖➖➖➖➖➖➖➖➖\n"
-                    f"Текущее имя: {current_data.get('name', 'не указано')}\n"
-                    "🎯 Введите новое имя или нажмите /skip чтобы оставить текущее:",
-                    reply_markup=ReplyKeyboardRemove()
-                )
-            else:
-                # Новая регистрация
-                await update.message.reply_text(
-                    "👋 Добро пожаловать в регистрацию!\n\n"
-                    "📝 Для начала расскажите о себе.\n"
-                    "➖➖➖➖➖➖➖➖➖➖\n"
-                    "🎯 Введите ваше настоящее имя:",
-                    reply_markup=ReplyKeyboardRemove()
-                )
-            return RegistrationState.NAME
+            await update.message.reply_text(
+                "👋 Добро пожаловать в регистрацию!\n\n"
+                "📝 Для начала расскажите о себе.\n"
+                "➖➖➖➖➖➖➖➖➖➖\n"
+                "🎯 Введите ваше настоящее имя:",
+                reply_markup=ReplyKeyboardRemove()
+            )
+        return RegistrationState.NAME
 
     async def get_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Получение имени"""
-        if update.message.text == "/skip":
-            # Пропуск - оставляем текущее имя
-            current_name = context.user_data['registration'].get('name', '')
-            if current_name:
-                await update.message.reply_text(
-                    f"✅ Оставлено текущее имя: {current_name}",
-                    reply_markup=ReplyKeyboardRemove()
-                )
-                return await self.get_game_nickname(update, context)
-            else:
-                await update.message.reply_text("❌ Имя не может быть пустым. Пожалуйста, введите ваше имя:")
-                return RegistrationState.NAME
-        
         name = update.message.text.strip()
         
         if len(name) < 2:
@@ -98,19 +81,6 @@ class RegistrationManager:
 
     async def get_game_nickname(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Получение игрового ника"""
-        if update.message.text == "/skip":
-            # Пропуск - оставляем текущий ник
-            current_nickname = context.user_data['registration'].get('game_nickname', '')
-            if current_nickname:
-                await update.message.reply_text(
-                    f"✅ Оставлен текущий ник: {current_nickname}",
-                    reply_markup=ReplyKeyboardRemove()
-                )
-                return await self.get_bio(update, context)
-            else:
-                await update.message.reply_text("❌ Игровой ник не может быть пустым. Пожалуйста, введите ваш ник:")
-                return RegistrationState.GAME_NICKNAME
-        
         game_nickname = update.message.text.strip()
         
         if len(game_nickname) < 3:
@@ -138,13 +108,8 @@ class RegistrationManager:
     async def get_bio(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Получение информации о себе"""
         if update.message.text == "/skip" or update.message.text == "🚫 Пропустить":
-            # Пропуск - оставляем текущее описание
-            current_bio = context.user_data['registration'].get('bio')
-            if current_bio is not None:
-                skip_text = f"✅ Оставлено текущее описание: {current_bio}"
-            else:
-                skip_text = "✅ Раздел 'О себе' пропущен."
-                context.user_data['registration']['bio'] = None
+            context.user_data['registration']['bio'] = None
+            skip_text = "✅ Раздел 'О себе' пропущен."
         else:
             bio = update.message.text.strip()
             if len(bio) > 500:
@@ -166,13 +131,8 @@ class RegistrationManager:
     async def get_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Получение фотографии"""
         if update.message.text in ["/skip", "🚫 Пропустить фото"]:
-            # Пропуск - оставляем текущую фотографию
-            current_photo = context.user_data['registration'].get('photo_id')
-            if current_photo is not None:
-                photo_text = "✅ Оставлена текущая фотография."
-            else:
-                photo_text = "✅ Фотография пропущена."
-                context.user_data['registration']['photo_id'] = None
+            context.user_data['registration']['photo_id'] = None
+            photo_text = "✅ Фотография пропущена."
         elif update.message.photo:
             # Берем последнее (самое качественное) фото
             photo_file = update.message.photo[-1]
@@ -212,12 +172,12 @@ class RegistrationManager:
         user_choice = update.message.text
         user_id = update.effective_user.id
         
-        if user_choice == "✅ Всё верно" or user_choice == "✅ Да, редактировать":
+        if user_choice == "✅ Всё верно":
             # Сохраняем в базу
             registration_data = context.user_data.get('registration', {})
             
             if not registration_data:
-                await update.message.reply_text("❌ Ошибка данных. Начните регистрацию заново: /start")
+                await update.message.reply_text("❌ Ошибка данных. Начните регистрацию заново: /registrate")
                 return ConversationHandler.END
             
             # Сохраняем/обновляем пользователя
@@ -261,6 +221,7 @@ class RegistrationManager:
             
             # Очищаем временные данные
             context.user_data.pop('registration', None)
+            context.user_data.pop('is_editing', None)  # Очищаем флаг редактирования
             
         elif user_choice == "🔄 Заполнить заново":
             await update.message.reply_text(
@@ -270,19 +231,12 @@ class RegistrationManager:
             )
             return RegistrationState.NAME
         
-        elif user_choice == "❌ Нет, оставить как есть":
-            await update.message.reply_text(
-                "✅ Хорошо, профиль остается без изменений.",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            # Очищаем временные данные
-            context.user_data.pop('registration', None)
-        
         return ConversationHandler.END
 
     async def cancel_registration(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Отмена регистрации"""
         context.user_data.pop('registration', None)
+        context.user_data.pop('is_editing', None)  # Очищаем флаг редактирования
         await update.message.reply_text(
             "❌ Регистрация отменена.",
             reply_markup=ReplyKeyboardRemove()

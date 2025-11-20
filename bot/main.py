@@ -1,8 +1,12 @@
 import os
 import logging
+import asyncio
 from dotenv import load_dotenv
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationHandler, CallbackQueryHandler
 from telegram import ReplyKeyboardRemove
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.date import DateTrigger
+from datetime import datetime
 from .database import Database
 from .handlers import Handlers
 from .game_announcements import GameAnnouncementManager, GameAnnouncementStates
@@ -34,8 +38,11 @@ class TelegramBot:
         # Создаем приложение
         self.application = Application.builder().token(self.bot_token).build()
         
+        # Инициализируем планировщик
+        self.scheduler = AsyncIOScheduler()
+        
         # Инициализируем менеджеры
-        self.game_manager = GameAnnouncementManager(self.db, self.application.bot)
+        self.game_manager = GameAnnouncementManager(self.db, self.application.bot, self.scheduler)
         self.registration_manager = GameRegistrationManager(self.db, self.game_manager)
         self.recurring_manager = RecurringGameManager(self.db, self.game_manager)
         
@@ -47,18 +54,15 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("edit", self.handlers.edit_profile))
         self.application.add_handler(CommandHandler("stats", self.handlers.stats))
         
-        # Анонсы игр
-        game_conv_handler = ConversationHandler(
+        # Анонсы игр (объединенный функционал)
+        newgame_conv_handler = ConversationHandler(
             entry_points=[CommandHandler("newgame", self.game_manager.start_creation)],
             states={
-                GameAnnouncementStates.SELECT_TEMPLATE: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.game_manager.select_template)
+                GameAnnouncementStates.DESCRIPTION: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.game_manager.get_description)
                 ],
                 GameAnnouncementStates.TITLE: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.game_manager.get_title)
-                ],
-                GameAnnouncementStates.DESCRIPTION: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.game_manager.get_description)
                 ],
                 GameAnnouncementStates.DATE: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.game_manager.get_date)
@@ -66,65 +70,32 @@ class TelegramBot:
                 GameAnnouncementStates.TIME: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.game_manager.get_time)
                 ],
-                GameAnnouncementStates.LOCATION: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.game_manager.get_location)
+                GameAnnouncementStates.HOST: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.game_manager.get_host)
+                ],
+                GameAnnouncementStates.FREQUENCY: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.game_manager.get_frequency)
+                ],
+                GameAnnouncementStates.PUBLICATION_CHOICE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.game_manager.get_publication_choice)
+                ],
+                GameAnnouncementStates.PUBLICATION_DATE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.game_manager.get_publication_date)
+                ],
+                GameAnnouncementStates.PUBLICATION_TIME: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.game_manager.get_publication_time)
+                ],
+                GameAnnouncementStates.DAYS_BEFORE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.game_manager.get_days_before)
                 ],
                 GameAnnouncementStates.CONFIRM: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.game_manager.confirm_announcement)
-                ],
-                GameAnnouncementStates.CUSTOM_TEXT: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.game_manager.get_custom_text)
                 ],
             },
             fallbacks=[CommandHandler("cancel", self.game_manager.cancel_creation)]
         )
         
-        self.application.add_handler(game_conv_handler)
-        
-        # Регулярные игры
-        # В методе setup_handlers обновим состояния для recurring_conv_handler
-        # В методе setup_handlers обновим recurring_conv_handler
-        recurring_conv_handler = ConversationHandler(
-            entry_points=[CommandHandler("recurring", self.recurring_manager.start_creation)],
-            states={
-                RecurringGameStates.TITLE: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.recurring_manager.get_title)
-                ],
-                RecurringGameStates.DESCRIPTION: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.recurring_manager.get_description)
-                ],
-                RecurringGameStates.LOCATION: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.recurring_manager.get_location)
-                ],
-                RecurringGameStates.FREQUENCY: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.recurring_manager.get_frequency)
-                ],
-                RecurringGameStates.GAME_TIME: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.recurring_manager.get_game_time)
-                ],
-                RecurringGameStates.ANNOUNCEMENT_DAY: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.recurring_manager.get_announcement_day)
-                ],
-                RecurringGameStates.ANNOUNCEMENT_TIME: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.recurring_manager.get_announcement_time)
-                ],
-                RecurringGameStates.DAY_OF_WEEK: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.recurring_manager.get_day_of_week)
-                ],
-                RecurringGameStates.START_DATE: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.recurring_manager.get_start_date)
-                ],
-                RecurringGameStates.END_DATE: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.recurring_manager.get_end_date)
-                ],
-                RecurringGameStates.CONFIRM: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.recurring_manager.confirm_template)
-                ],
-            },
-            fallbacks=[CommandHandler("cancel", self.recurring_manager.cancel_creation)]
-        )
-        
-        self.application.add_handler(recurring_conv_handler)
+        self.application.add_handler(newgame_conv_handler)
         
         # Редактирование игр
         edit_game_conv_handler = ConversationHandler(
@@ -220,6 +191,32 @@ class TelegramBot:
         except Exception as e:
             await update.message.reply_text(f"❌ Ошибка отправки: {str(e)}")
     
+    def setup_scheduled_jobs(self):
+        """Настройка запланированных заданий при запуске"""
+        # Загружаем все запланированные публикации из базы
+        scheduled_games = self.db.get_scheduled_games()
+        
+        for game in scheduled_games:
+            # Планируем публикацию для каждой игры
+            self.game_manager.schedule_announcement_publication(game.id, game.publication_date)
+            
+        logging.info(f"Загружено {len(scheduled_games)} запланированных публикаций")
+    
+    async def on_startup(self, application: Application):
+        """Действия при запуске бота"""
+        # Загрузка запланированных публикаций
+        self.setup_scheduled_jobs()
+        
+        # Запуск планировщика
+        self.scheduler.start()
+        logging.info("📅 Планировщик запущен")
+    
+    async def on_shutdown(self, application: Application):
+        """Действия при остановке бота"""
+        # Остановка планировщика
+        self.scheduler.shutdown()
+        logging.info("📅 Планировщик остановлен")
+    
     def run(self):
         """Запуск бота"""
         # Инициализация базы данных
@@ -234,6 +231,10 @@ class TelegramBot:
         
         # Настройка обработчиков
         self.setup_handlers()
+        
+        # Регистрация обработчиков запуска и остановки
+        self.application.post_init = self.on_startup
+        self.application.post_stop = self.on_shutdown
         
         # Запуск бота
         logging.info("🤖 Бот запускается...")

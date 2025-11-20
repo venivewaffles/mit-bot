@@ -11,7 +11,10 @@ class Handlers:
     def get_conv_handler(self):
         """Получение ConversationHandler для регистрации"""
         return ConversationHandler(
-            entry_points=[CommandHandler('start', self.registration_manager.start_registration)],
+            entry_points=[
+                CommandHandler('registrate', self.registration_manager.start_registration),
+                CommandHandler('edit', self.start_edit_profile)
+            ],
             states={
                 RegistrationState.NAME: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.registration_manager.get_name)
@@ -33,6 +36,35 @@ class Handlers:
             allow_reentry=True
         )
     
+    async def start_edit_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Начало редактирования профиля"""
+        user_id = update.effective_user.id
+        user = self.db.get_user(user_id)
+        
+        # Если профиля нет
+        if not user or not user.registration_complete:
+            await update.message.reply_text(
+                "❌ У вас еще нет профиля!\n"
+                "Для регистрации используйте команду /registrate"
+            )
+            return ConversationHandler.END
+        
+        # Очищаем любые предыдущие данные регистрации
+        context.user_data.pop('registration', None)
+        
+        # Устанавливаем флаг редактирования
+        context.user_data['is_editing'] = True
+        
+        # Запускаем процесс регистрации заново без предзаполнения
+        await update.message.reply_text(
+            "✏️ РЕДАКТИРОВАНИЕ ПРОФИЛЯ\n\n"
+            "Вы можете изменить данные вашего профиля.\n"
+            "➖➖➖➖➖➖➖➖➖➖\n"
+            "🎯 Введите ваше настоящее имя:",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return RegistrationState.NAME
+    
     async def profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Просмотр профиля"""
         user_id = update.effective_user.id
@@ -41,7 +73,7 @@ class Handlers:
         if not user or not user.registration_complete:
             await update.message.reply_text(
                 "❌ Вы еще не зарегистрированы!\n"
-                "Используйте /start для регистрации."
+                "Используйте /registrate для регистрации."
             )
             return
         
@@ -56,28 +88,8 @@ class Handlers:
             await update.message.reply_text(profile_text)
     
     async def edit_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Редактирование профиля - запускает процесс регистрации заново"""
-        user_id = update.effective_user.id
-        user = self.db.get_user(user_id)
-        
-        if not user or not user.registration_complete:
-            await update.message.reply_text(
-                "❌ У вас еще нет профиля! Сначала зарегистрируйтесь с помощью команды /start"
-            )
-            return ConversationHandler.END
-        
-        # Загружаем текущие данные в контекст для предзаполнения
-        context.user_data['registration'] = user.to_dict()
-        
-        # Запускаем процесс регистрации с предзаполненными данными
-        await update.message.reply_text(
-            "✏️ Редактирование профиля\n\n"
-            "Вы можете изменить любые данные вашего профиля. Давайте начнем!",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        
-        # Запускаем процесс регистрации с предзаполненными данными
-        return await self.registration_manager.start_registration(update, context)
+        """Редактирование профиля (альтернативный вызов)"""
+        return await self.start_edit_profile(update, context)
     
     async def stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Статистика бота"""

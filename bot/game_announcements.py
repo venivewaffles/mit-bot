@@ -1,25 +1,31 @@
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ContextTypes, ConversationHandler
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 import os
 import logging
 from .templates import GameTemplates
+from .models import FrequencyType
+from apscheduler.triggers.date import DateTrigger
 
 class GameAnnouncementStates:
-    SELECT_TEMPLATE = 1
-    TITLE = 2
-    DESCRIPTION = 3
-    DATE = 4
-    TIME = 5
-    LOCATION = 6
-    CONFIRM = 7
-    CUSTOM_TEXT = 8
+    TITLE = 1
+    DESCRIPTION = 2
+    DATE = 3
+    TIME = 4
+    HOST = 5
+    FREQUENCY = 6
+    PUBLICATION_CHOICE = 7  # Новое состояние для выбора типа публикации
+    PUBLICATION_DATE = 8
+    PUBLICATION_TIME = 9
+    DAYS_BEFORE = 10
+    CONFIRM = 11
 
 class GameAnnouncementManager:
-    def __init__(self, database, bot):
+    def __init__(self, database, bot, scheduler):
         self.db = database
         self.bot = bot
+        self.scheduler = scheduler
         self.templates = GameTemplates()
         self.logger = logging.getLogger(__name__)
     
@@ -32,187 +38,287 @@ class GameAnnouncementManager:
             await update.message.reply_text("❌ Эта команда доступна только администраторам!")
             return ConversationHandler.END
         
-        # Показываем шаблоны
-        templates = self.templates.get_templates()
-        keyboard = []
-        
-        for key, template in templates.items():
-            keyboard.append([f"📋 {template['name']}"])
-        
-        keyboard.append(["✏️ Свой текст"])
-        keyboard.append(["❌ Отмена"])
-        
         await update.message.reply_text(
             "🎮 СОЗДАНИЕ АНОНСА ИГРЫ\n\n"
-            "Выберите шаблон анонса или создайте свой текст:",
-            reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-        )
-        
-        return GameAnnouncementStates.SELECT_TEMPLATE
-    
-    async def select_template(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Выбор шаблона"""
-        choice = update.message.text
-        templates = self.templates.get_templates()
-        
-        # Сохраняем выбранный шаблон в контексте
-        template_found = False
-        for key, template in templates.items():
-            template_button_text = f"📋 {template['name']}"
-            if choice == template_button_text:
-                context.user_data['game_announcement'] = {
-                    'template': key,
-                    'template_name': template['name']
-                }
-                template_found = True
-                break
-        
-        if choice == "✏️ Свой текст":
-            context.user_data['game_announcement'] = {'template': 'custom'}
-            await update.message.reply_text(
-                "✍️ Введите полный текст анонса:\n\n"
-                "💡 Обязательно укажите дату игры в тексте!",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            return GameAnnouncementStates.CUSTOM_TEXT
-        
-        elif choice == "❌ Отмена":
-            await self.cancel_creation(update, context)
-            return ConversationHandler.END
-        
-        elif template_found:
-            # Для шаблонов запрашиваем дополнительные данные
-            await update.message.reply_text(
-                "📝 Введите заголовок анонса:",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            return GameAnnouncementStates.TITLE
-        
-        else:
-            # Если шаблон не найден, показываем сообщение об ошибке
-            await update.message.reply_text(
-                "❌ Неизвестный выбор. Пожалуйста, выберите шаблон из списка ниже:",
-                reply_markup=ReplyKeyboardMarkup([
-                    ["📋 ЛИГА КЛУБОВ + ЛИГА МИТ"],
-                    ["📋 Стандартная игра"], 
-                    ["📋 Турнир"],
-                    ["✏️ Свой текст"],
-                    ["❌ Отмена"]
-                ], one_time_keyboard=True)
-            )
-            return GameAnnouncementStates.SELECT_TEMPLATE
-    
-    async def get_custom_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Получение кастомного текста"""
-        custom_text = update.message.text
-        context.user_data['game_announcement']['custom_text'] = custom_text
-        
-        # Пытаемся извлечь дату из текста
-        date_match = re.search(r'(\d{1,2})\.(\d{1,2})', custom_text)
-        if date_match:
-            day, month = date_match.groups()
-            current_year = datetime.now().year
-            try:
-                game_date = datetime(current_year, int(month), int(day))
-                context.user_data['game_announcement']['game_date'] = game_date
-            except ValueError:
-                pass
-        
-        await update.message.reply_text(
-            "📅 Теперь укажите дату игры (ДД.ММ):\n\n"
-            "Пример: 20.11",
+            "📝 Введите текст анонса (полное описание игры):",
             reply_markup=ReplyKeyboardRemove()
         )
-        return GameAnnouncementStates.DATE
+        
+        return GameAnnouncementStates.DESCRIPTION
+    
+    async def get_description(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Получение описания игры"""
+        description = update.message.text
+        context.user_data['game_announcement'] = {'description': description}
+        
+        await update.message.reply_text(
+            "🏷️ Введите короткое название для отображения в списке игр:"
+        )
+        return GameAnnouncementStates.TITLE
     
     async def get_title(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Получение заголовка"""
+        """Получение короткого названия"""
         title = update.message.text
         context.user_data['game_announcement']['title'] = title
         
         await update.message.reply_text(
-            "📖 Введите описание игры:"
-        )
-        return GameAnnouncementStates.DESCRIPTION
-    
-    async def get_description(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Получение описания"""
-        description = update.message.text
-        context.user_data['game_announcement']['description'] = description
-        
-        await update.message.reply_text(
-            "📅 Укажите дату игры (ДД.ММ):\n\n"
-            "Пример: 20.11"
+            "📅 Укажите дату игры (ДД.ММ.ГГГГ):\n\n"
+            "Пример: 20.11.2023"
         )
         return GameAnnouncementStates.DATE
     
     async def get_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Получение даты"""
+        """Получение даты игры"""
         date_text = update.message.text
         
         try:
-            day, month = map(int, date_text.split('.'))
-            current_year = datetime.now().year
-            game_date = datetime(current_year, month, day)
+            day, month, year = map(int, date_text.split('.'))
+            game_date = datetime(year, month, day)
             
             # Проверяем, что дата в будущем
-            if game_date < datetime.now():
+            if game_date.date() < datetime.now().date():
                 await update.message.reply_text("❌ Дата должна быть в будущем! Попробуйте снова:")
                 return GameAnnouncementStates.DATE
             
             context.user_data['game_announcement']['game_date'] = game_date
             
             await update.message.reply_text(
-                "⏰ Укажите время начала (ЧЧ:ММ):\n\n"
+                "⏰ Укажите время начала игры (ЧЧ:ММ):\n\n"
                 "Пример: 19:00"
             )
             return GameAnnouncementStates.TIME
             
         except (ValueError, AttributeError):
-            await update.message.reply_text("❌ Неверный формат даты! Используйте ДД.ММ:")
+            await update.message.reply_text("❌ Неверный формат даты! Используйте ДД.ММ.ГГГГ:")
             return GameAnnouncementStates.DATE
     
     async def get_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Получение времени"""
+        """Получение времени игры"""
         time_text = update.message.text
         
         try:
             hours, minutes = map(int, time_text.split(':'))
             game_date = context.user_data['game_announcement']['game_date']
             game_date = game_date.replace(hour=hours, minute=minutes)
+            
+            # Проверяем, что время в будущем
+            if game_date < datetime.now():
+                await update.message.reply_text("❌ Время должно быть в будущем! Попробуйте снова:")
+                return GameAnnouncementStates.TIME
+            
             context.user_data['game_announcement']['game_date'] = game_date
             
             await update.message.reply_text(
-                "📍 Укажите локацию (место проведения):\n\n"
-                "Пример: антикафе «Проспект»"
+                "🎯 Укажите ведущего игры:"
             )
-            return GameAnnouncementStates.LOCATION
+            return GameAnnouncementStates.HOST
             
         except (ValueError, AttributeError):
             await update.message.reply_text("❌ Неверный формат времени! Используйте ЧЧ:ММ:")
             return GameAnnouncementStates.TIME
     
-    async def get_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Получение локации"""
-        location = update.message.text
-        context.user_data['game_announcement']['location'] = location
+    async def get_host(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Получение информации о ведущем"""
+        host = update.message.text
+        context.user_data['game_announcement']['host'] = host
         
-        # Показываем превью анонса
+        await update.message.reply_text(
+            "🔄 Выберите периодичность игры:",
+            reply_markup=ReplyKeyboardMarkup([
+                ["📅 Единоразово", "📅 Еженедельно"],
+                ["📅 Ежедневно", "📅 Раз в 2 недели"],
+                ["📅 Ежемесячно"]
+            ], one_time_keyboard=True)
+        )
+        return GameAnnouncementStates.FREQUENCY
+    
+    async def get_frequency(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Получение периодичности"""
+        frequency_text = update.message.text
+        
+        frequency_map = {
+            "📅 Единоразово": FrequencyType.ONCE,
+            "📅 Еженедельно": FrequencyType.WEEKLY,
+            "📅 Ежедневно": FrequencyType.DAILY,
+            "📅 Раз в 2 недели": FrequencyType.BIWEEKLY,
+            "📅 Ежемесячно": FrequencyType.MONTHLY
+        }
+        
+        frequency = frequency_map.get(frequency_text)
+        if not frequency:
+            await update.message.reply_text(
+                "❌ Пожалуйста, выберите вариант из предложенных:",
+                reply_markup=ReplyKeyboardMarkup([
+                    ["📅 Единоразово", "📅 Еженедельно"],
+                    ["📅 Ежедневно", "📅 Раз в 2 недели"],
+                    ["📅 Ежемесячно"]
+                ], one_time_keyboard=True)
+            )
+            return GameAnnouncementStates.FREQUENCY
+        
+        context.user_data['game_announcement']['frequency'] = frequency
+        
+        if frequency == FrequencyType.ONCE:
+            await update.message.reply_text(
+                "📢 Хотите опубликовать анонс сразу или запланировать?\n\n"
+                "Выберите вариант:",
+                reply_markup=ReplyKeyboardMarkup([
+                    ["🚀 Опубликовать сразу", "📅 Запланировать публикацию"]
+                ], one_time_keyboard=True)
+            )
+            return GameAnnouncementStates.PUBLICATION_CHOICE
+        else:
+            await update.message.reply_text(
+                "📢 За сколько дней до игры публиковать анонс?\n\n"
+                "Пример: 1 - за 1 день до игры\n"
+                "Пример: 0 - в день игры",
+                reply_markup=ReplyKeyboardMarkup([
+                    ["0", "1", "2"],
+                    ["3", "4", "5"]
+                ], one_time_keyboard=True)
+            )
+            return GameAnnouncementStates.DAYS_BEFORE
+    
+    async def get_publication_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка выбора типа публикации для единоразовых игр"""
+        choice = update.message.text
+        
+        if choice == "🚀 Опубликовать сразу":
+            context.user_data['game_announcement']['publish_immediately'] = True
+            return await self.show_confirmation(update, context)
+        
+        elif choice == "📅 Запланировать публикацию":
+            await update.message.reply_text(
+                "📅 Укажите дату публикации анонса (ДД.ММ.ГГГГ):\n\n"
+                "Пример: 18.11.2023",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return GameAnnouncementStates.PUBLICATION_DATE
+        
+        else:
+            await update.message.reply_text(
+                "❌ Пожалуйста, выберите вариант из предложенных:",
+                reply_markup=ReplyKeyboardMarkup([
+                    ["🚀 Опубликовать сразу", "📅 Запланировать публикацию"]
+                ], one_time_keyboard=True)
+            )
+            return GameAnnouncementStates.PUBLICATION_CHOICE
+    
+    async def get_publication_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Получение даты публикации для запланированных анонсов"""
+        date_text = update.message.text
+        
+        try:
+            day, month, year = map(int, date_text.split('.'))
+            publication_date = datetime(year, month, day)
+            
+            # Проверяем, что дата публикации не позже даты игры
+            game_date = context.user_data['game_announcement']['game_date']
+            if publication_date.date() > game_date.date():
+                await update.message.reply_text(
+                    "❌ Дата публикации не может быть позже даты игры! Попробуйте снова:"
+                )
+                return GameAnnouncementStates.PUBLICATION_DATE
+            
+            # Проверяем, что дата публикации в будущем
+            if publication_date.date() < datetime.now().date():
+                await update.message.reply_text(
+                    "❌ Дата публикации должна быть в будущем! Попробуйте снова:"
+                )
+                return GameAnnouncementStates.PUBLICATION_DATE
+            
+            context.user_data['game_announcement']['publication_date'] = publication_date
+            
+            await update.message.reply_text(
+                "⏰ Укажите время публикации анонса (ЧЧ:ММ):\n\n"
+                "Пример: 12:00",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return GameAnnouncementStates.PUBLICATION_TIME
+            
+        except (ValueError, AttributeError):
+            await update.message.reply_text("❌ Неверный формат даты! Используйте ДД.ММ.ГГГГ:")
+            return GameAnnouncementStates.PUBLICATION_DATE
+    
+    async def get_days_before(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Получение количества дней для публикации анонса (для повторяющихся игр)"""
+        try:
+            days_before = int(update.message.text)
+            if days_before < 0:
+                raise ValueError
+                
+            context.user_data['game_announcement']['days_before'] = days_before
+            
+            await update.message.reply_text(
+                "⏰ Укажите время публикации анонса (ЧЧ:ММ):\n\n"
+                "Пример: 12:00",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return GameAnnouncementStates.PUBLICATION_TIME
+            
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Пожалуйста, введите число (0 или больше):",
+                reply_markup=ReplyKeyboardMarkup([
+                    ["0", "1", "2"],
+                    ["3", "4", "5"]
+                ], one_time_keyboard=True)
+            )
+            return GameAnnouncementStates.DAYS_BEFORE
+    
+    async def get_publication_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Получение времени публикации"""
+        time_text = update.message.text
+        
+        try:
+            hours, minutes = map(int, time_text.split(':'))
+            if not (0 <= hours <= 23 and 0 <= minutes <= 59):
+                raise ValueError
+            
+            announcement_data = context.user_data['game_announcement']
+            
+            # Для единоразовых игр с запланированной публикацией
+            if 'publication_date' in announcement_data:
+                publication_date = announcement_data['publication_date']
+                publication_datetime = publication_date.replace(hour=hours, minute=minutes)
+                
+                # Проверяем, что время публикации раньше времени игры
+                game_date = announcement_data['game_date']
+                if publication_datetime >= game_date:
+                    await update.message.reply_text(
+                        "❌ Время публикации должно быть раньше времени игры! Попробуйте снова:"
+                    )
+                    return GameAnnouncementStates.PUBLICATION_TIME
+                
+                announcement_data['publication_datetime'] = publication_datetime
+            
+            # Для повторяющихся игр
+            else:
+                announcement_data['publication_time'] = time_text
+            
+            return await self.show_confirmation(update, context)
+            
+        except (ValueError, AttributeError):
+            await update.message.reply_text("❌ Неверный формат времени! Используйте ЧЧ:ММ:")
+            return GameAnnouncementStates.PUBLICATION_TIME
+    
+    async def show_confirmation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показ подтверждения перед созданием"""
         announcement_data = context.user_data['game_announcement']
-        preview_text = await self._format_announcement_preview(announcement_data)
+        preview_text = self._format_announcement_preview(announcement_data)
         
         await update.message.reply_text(
             f"📋 ПРЕВЬЮ АНОНСА:\n\n{preview_text}\n\n"
             "Всё верно?",
             reply_markup=ReplyKeyboardMarkup([
-                ["✅ Опубликовать", "🔄 Изменить заново"],
+                ["✅ Создать анонс", "🔄 Изменить заново"],
                 ["❌ Отмена"]
             ], one_time_keyboard=True)
         )
         return GameAnnouncementStates.CONFIRM
     
     async def confirm_announcement(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Подтверждение и публикация анонса"""
+        """Подтверждение и создание анонса"""
         choice = update.message.text
         user_id = update.effective_user.id
         
@@ -228,7 +334,7 @@ class GameAnnouncementManager:
             )
             return await self.start_creation(update, context)
         
-        elif choice == "✅ Опубликовать":
+        elif choice == "✅ Создать анонс":
             announcement_data = context.user_data.get('game_announcement', {})
             
             if not announcement_data:
@@ -239,75 +345,68 @@ class GameAnnouncementManager:
             announcement_data['created_by'] = user_id
             
             try:
-                # Сохраняем в базу
-                game = self.db.create_game_announcement(announcement_data)
-                self.logger.info(f"Создана игра с ID: {game.id}")
+                frequency = announcement_data.get('frequency', FrequencyType.ONCE)
                 
-                # Публикуем в канал
-                channel_id = os.getenv('CHANNEL_ID')
-                
-                if not channel_id:
-                    await update.message.reply_text(
-                        "❌ CHANNEL_ID не указан в настройках!\n"
-                        "Добавьте CHANNEL_ID в .env файл\n\n"
-                        "💡 Используйте /get_channel_info чтобы получить ID канала",
-                        reply_markup=ReplyKeyboardRemove()
-                    )
-                    return ConversationHandler.END
-                
-                final_text = await self._format_final_announcement(game)
-                self.logger.info(f"Формируем анонс для канала {channel_id}")
-                
-                # Пытаемся опубликовать в канал
-                try:
-                    message = await context.bot.send_message(
-                        chat_id=channel_id,
-                        text=final_text,
-                        parse_mode='HTML'
-                    )
+                if frequency == FrequencyType.ONCE:
+                    # Создаем единоразовую игру
+                    game_data = {
+                        'title': announcement_data['title'],
+                        'description': announcement_data['description'],
+                        'game_date': announcement_data['game_date'],
+                        'location': announcement_data.get('location', 'Не указана'),
+                        'max_players': announcement_data.get('max_players', 10),
+                        'created_by': user_id,
+                        'template': 'standard',
+                        'is_recurring': False,
+                        'host': announcement_data.get('host', 'Не указан')
+                    }
                     
-                    self.logger.info(f"Сообщение опубликовано с ID: {message.message_id}")
-                    
-                    # Сохраняем ID сообщения для будущих обновлений
-                    result = self.db.update_channel_message_id(game.id, message.message_id)
-                    if result:
-                        self.logger.info(f"channel_message_id сохранен для игры {game.id}")
+                    # Обработка публикации
+                    if announcement_data.get('publish_immediately'):
+                        # Публикуем сразу
+                        game_data['is_published'] = True
+                        game = self.db.create_game_announcement(game_data)
+                        await self._publish_announcement(game, context)
+                        response_text = "✅ Анонс создан и опубликован!"
                     else:
-                        self.logger.error(f"Не удалось сохранить channel_message_id для игры {game.id}")
+                        # Запланированная публикация
+                        publication_datetime = announcement_data.get('publication_datetime')
+                        game_data['publication_date'] = publication_datetime
+                        game_data['is_published'] = False
+                        game = self.db.create_game_announcement(game_data)
+                        
+                        # Планируем публикацию
+                        self.schedule_announcement_publication(game.id, publication_datetime)
+                        response_text = f"✅ Анонс создан и будет опубликован {publication_datetime.strftime('%d.%m.%Y в %H:%M')}!"
                     
-                    await update.message.reply_text(
-                        "✅ Анонс успешно создан и опубликован в канале!\n"
-                        "📢 Теперь при записи игроков список будет автоматически обновляться.",
-                        reply_markup=ReplyKeyboardRemove()
-                    )
+                else:
+                    # Создаем шаблон регулярной игры
+                    template_data = {
+                        'title': announcement_data['title'],
+                        'description': announcement_data['description'],
+                        'location': announcement_data.get('location', 'Не указана'),
+                        'max_players': announcement_data.get('max_players', 10),
+                        'template': 'standard',
+                        'frequency': frequency,
+                        'game_time': announcement_data['game_date'].strftime('%H:%M'),
+                        'announcement_time': announcement_data.get('publication_time', '12:00'),
+                        'announcement_day_offset': announcement_data.get('days_before', 1),
+                        'start_date': announcement_data['game_date'],
+                        'created_by': user_id,
+                        'host': announcement_data.get('host', 'Не указан')
+                    }
                     
-                except Exception as channel_error:
-                    error_message = str(channel_error)
-                    self.logger.error(f"Ошибка публикации в канал: {error_message}")
+                    # Для еженедельных игр добавляем день недели
+                    if frequency in [FrequencyType.WEEKLY, FrequencyType.BIWEEKLY]:
+                        template_data['day_of_week'] = announcement_data['game_date'].weekday()
                     
-                    if "Chat not found" in error_message:
-                        await update.message.reply_text(
-                            "❌ Канал не найден!\n"
-                            "Проверьте:\n"
-                            "1. Правильность CHANNEL_ID в .env\n"
-                            "2. Бот добавлен в канал как администратор\n"
-                            "3. Бот имеет права на отправку сообщений\n\n"
-                            f"💡 Текущий CHANNEL_ID: {channel_id}",
-                            reply_markup=ReplyKeyboardRemove()
-                        )
-                    elif "Not enough rights" in error_message:
-                        await update.message.reply_text(
-                            "❌ У бота недостаточно прав!\n"
-                            "Дайте боту права администратора в канале с разрешением:\n"
-                            "• Отправка сообщений\n"
-                            "• Редактирование сообщений",
-                            reply_markup=ReplyKeyboardRemove()
-                        )
-                    else:
-                        await update.message.reply_text(
-                            f"❌ Ошибка публикации в канал: {error_message}",
-                            reply_markup=ReplyKeyboardRemove()
-                        )
+                    template = self.db.create_recurring_template(template_data)
+                    response_text = f"✅ Шаблон регулярной игры создан! (ID: {template.id})"
+                
+                await update.message.reply_text(
+                    response_text,
+                    reply_markup=ReplyKeyboardRemove()
+                )
                 
             except Exception as e:
                 self.logger.error(f"Ошибка при создании анонса: {str(e)}")
@@ -319,94 +418,166 @@ class GameAnnouncementManager:
             # Очищаем временные данные
             context.user_data.pop('game_announcement', None)
             return ConversationHandler.END
+
+    def schedule_announcement_publication(self, game_id, publication_datetime):
+        """Планирование публикации анонса"""
+        try:
+            # Добавляем задание в планировщик
+            self.scheduler.add_job(
+                self._publish_scheduled_announcement,
+                trigger=DateTrigger(run_date=publication_datetime),
+                args=[game_id],
+                id=f'game_publish_{game_id}',
+                replace_existing=True
+            )
+            
+            self.logger.info(f"Запланирована публикация игры {game_id} на {publication_datetime}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка при планировании публикации: {e}")
+            return False
+
+    async def _publish_scheduled_announcement(self, game_id):
+        """Публикация запланированного анонса"""
+        try:
+            self.logger.info(f"Запуск запланированной публикации для игры {game_id}")
+            
+            game = self.db.get_game_by_id(game_id)
+            if not game:
+                self.logger.error(f"Игра {game_id} не найдена")
+                return
+            
+            # Публикуем анонс
+            await self._publish_announcement_direct(game)
+            
+            # Помечаем как опубликованную
+            self.db.mark_game_as_published(game_id, game.channel_message_id)
+            
+            self.logger.info(f"Анонс игры {game_id} успешно опубликован по расписанию")
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка при публикации запланированного анонса {game_id}: {e}")
+
+    async def _publish_announcement_direct(self, game):
+        """Прямая публикация анонса (без контекста)"""
+        channel_id = os.getenv('CHANNEL_ID')
+        
+        if not channel_id:
+            self.logger.error("CHANNEL_ID не указан в настройках")
+            return
+        
+        try:
+            final_text = await self._format_final_announcement(game)
+            message = await self.bot.send_message(
+                chat_id=channel_id,
+                text=final_text,
+                parse_mode='HTML'
+            )
+            
+            # Сохраняем ID сообщения и помечаем как опубликованное
+            self.db.update_channel_message_id(game.id, message.message_id)
+            self.db.mark_game_as_published(game.id, message.message_id)
+            self.logger.info(f"Анонс игры {game.id} опубликован в канале")
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка публикации в канал: {e}")
+            raise e
+
+    async def _publish_announcement(self, game, context):
+        """Публикация анонса в канал (с контекстом)"""
+        channel_id = os.getenv('CHANNEL_ID')
+        
+        if not channel_id:
+            self.logger.error("CHANNEL_ID не указан в настройках")
+            return
+        
+        try:
+            final_text = await self._format_final_announcement(game)
+            message = await context.bot.send_message(
+                chat_id=channel_id,
+                text=final_text,
+                parse_mode='HTML'
+            )
+            
+            # Сохраняем ID сообщения
+            self.db.update_channel_message_id(game.id, message.message_id)
+            self.db.mark_game_as_published(game.id, message.message_id)
+            self.logger.info(f"Анонс игры {game.id} опубликован в канале")
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка публикации в канал: {e}")
+            raise e
     
-    async def cancel_creation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отмена создания анонса"""
-        context.user_data.pop('game_announcement', None)
-        await update.message.reply_text(
-            "❌ Создание анонса отменено.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-    
-    async def _format_announcement_preview(self, announcement_data):
+    def _format_announcement_preview(self, announcement_data):
         """Форматирование превью анонса"""
-        if announcement_data.get('template') == 'custom':
-            return announcement_data.get('custom_text', '')
+        game_date = announcement_data['game_date']
+        frequency = announcement_data.get('frequency', FrequencyType.ONCE)
         
-        template_key = announcement_data.get('template')
-        templates = self.templates.get_templates()
-        template = templates.get(template_key, templates['standard'])
+        text = f"""
+🏆 {announcement_data['title']}
+
+📝 {announcement_data['description']}
+
+📅 Дата и время: {game_date.strftime('%d.%m.%Y %H:%M')}
+🎯 Ведущий: {announcement_data.get('host', 'Не указан')}
+🔄 Периодичность: {self._format_frequency(frequency)}
+"""
         
-        formatted_date = self.templates.format_date(announcement_data['game_date'])
+        if frequency == FrequencyType.ONCE:
+            if announcement_data.get('publish_immediately'):
+                text += "📢 Публикация: сразу\n"
+            else:
+                pub_time = announcement_data.get('publication_datetime')
+                if pub_time:
+                    text += f"📢 Публикация: {pub_time.strftime('%d.%m.%Y %H:%M')}\n"
+        else:
+            days_before = announcement_data.get('days_before', 1)
+            pub_time = announcement_data.get('publication_time', '12:00')
+            text += f"📢 Публикация: за {days_before} дн. в {pub_time}\n"
         
-        # Заполняем шаблон
-        text = template['template'].format(
-            title=announcement_data.get('title', ''),
-            description=announcement_data.get('description', ''),
-            date=formatted_date,
-            location=announcement_data.get('location', ''),
-            max_players=10,
-            current_players=0,
-            players_list="[Список игроков будет сгенерирован автоматически]",
-            host="[Ведущий]"
-        )
-        
-        return text
+        return text.strip()
+    
+    def _format_frequency(self, frequency):
+        """Форматирование периодичности"""
+        frequency_map = {
+            FrequencyType.ONCE: "Единоразово",
+            FrequencyType.DAILY: "Ежедневно",
+            FrequencyType.WEEKLY: "Еженедельно",
+            FrequencyType.BIWEEKLY: "Раз в 2 недели",
+            FrequencyType.MONTHLY: "Ежемесячно"
+        }
+        return frequency_map.get(frequency, str(frequency))
     
     async def _format_final_announcement(self, game):
-        """Форматирование финального анонса для канала с актуальным списком игроков"""
-        self.logger.info(f"Форматируем анонс для игры {game.id}")
-        
+        """Форматирование финального анонса для канала"""
         templates = self.templates.get_templates()
+        template = templates.get(game.template, templates['standard'])
         
-        if game.template != 'custom' and game.template in templates:
-            template = templates[game.template]
-            formatted_date = self.templates.format_date(game.game_date)
-            
-            # Получаем актуальные записи на игру
-            registrations = self.db.get_game_registrations(game.id)
-            self.logger.info(f"Найдено записей для игры {game.id}: {len(registrations)}")
-            
-            # Форматируем список игроков
-            players_list = self._format_players_list(registrations, game.max_players)
-            current_players = len([r for r in registrations if not r.is_reserve])
-            
-            text = template['template'].format(
-                title=game.title,
-                description=game.description,
-                date=formatted_date,
-                location=game.location,
-                max_players=game.max_players,
-                current_players=current_players,
-                players_list=players_list,
-                host="[Ведущий]"
-            )
-        else:
-            # Для кастомного текста
-            text = game.custom_text or game.description
-            
-            # Добавляем/обновляем список игроков
-            registrations = self.db.get_game_registrations(game.id)
-            players_list = self._format_players_list(registrations, game.max_players)
-            
-            # Ищем, где в тексте находится список игроков (если есть)
-            players_pattern = r"\n👥 Участники.*?:(?:\n.*)*"
-            
-            if re.search(players_pattern, text, re.DOTALL):
-                # Заменяем существующий список игроков
-                text = re.sub(players_pattern, f"\n\n👥 Участники:\n{players_list}", text)
-            else:
-                # Добавляем новый список игроков в конец
-                text += f"\n\n👥 Участники:\n{players_list}"
+        formatted_date = self.templates.format_date(game.game_date)
         
-        self.logger.info(f"Сформирован текст анонса для игры {game.id}")
+        # Получаем актуальные записи на игру
+        registrations = self.db.get_game_registrations(game.id)
+        
+        # Форматируем список игроков
+        players_list = self._format_players_list(registrations, game.max_players)
+        current_players = len([r for r in registrations if not r.is_reserve])
+        
+        text = template['template'].format(
+            title=game.title,
+            description=game.description,
+            date=formatted_date,
+            location=game.location,
+            max_players=game.max_players,
+            current_players=current_players,
+            players_list=players_list,
+            host=game.host or "Не указан"
+        )
+        
         return text
     
     def _format_players_list(self, registrations, max_players):
-        """Форматирование списка игроков (исправленная версия)"""
-        self.logger.info(f"Форматируем список игроков из {len(registrations)} записей")
-        
+        """Форматирование списка игроков"""
         main_players = [r for r in registrations if not r.is_reserve]
         reserve_players = [r for r in registrations if r.is_reserve]
         
@@ -414,7 +585,6 @@ class GameAnnouncementManager:
         
         # Основной список
         for i, reg in enumerate(main_players, 1):
-            # Безопасное получение имени пользователя
             if reg.user and reg.user.game_nickname:
                 player_name = reg.user.game_nickname
             else:
@@ -435,9 +605,16 @@ class GameAnnouncementManager:
         if not lines:
             return "Пока никто не записался 😔"
         
-        result = "\n".join(lines)
-        self.logger.info(f"Сформирован список игроков: {result}")
-        return result
+        return "\n".join(lines)
+    
+    async def cancel_creation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Отмена создания анонса"""
+        context.user_data.pop('game_announcement', None)
+        await update.message.reply_text(
+            "❌ Создание анонса отменено.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
     
     async def update_channel_announcement(self, game_id):
         """Обновление анонса в канале с актуальным списком игроков"""
@@ -446,6 +623,11 @@ class GameAnnouncementManager:
         game = self.db.get_game_by_id(game_id)
         if not game:
             self.logger.error(f"❌ Игра {game_id} не найдена в базе данных")
+            return
+        
+        # Проверяем, опубликована ли игра
+        if not game.is_published:
+            self.logger.info(f"Игра {game_id} еще не опубликована, пропускаем обновление анонса")
             return
         
         if not game.channel_message_id:
@@ -476,5 +658,7 @@ class GameAnnouncementManager:
             error_msg = str(e)
             if "Message is not modified" in error_msg:
                 self.logger.info(f"✅ Сообщение для игры {game_id} не требует изменений")
+            elif "Message to edit not found" in error_msg:
+                self.logger.error(f"❌ Сообщение для игры {game_id} не найдено в канале")
             else:
                 self.logger.error(f"❌ Ошибка при обновлении анонса в канале: {e}")

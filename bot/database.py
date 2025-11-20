@@ -171,7 +171,10 @@ class Database:
                 template=announcement_data.get('template', 'standard'),
                 custom_text=announcement_data.get('custom_text'),
                 is_recurring=announcement_data.get('is_recurring', False),
-                recurring_template_id=announcement_data.get('recurring_template_id')
+                recurring_template_id=announcement_data.get('recurring_template_id'),
+                host=announcement_data.get('host', 'Не указан'),
+                publication_date=announcement_data.get('publication_date'),
+                is_published=announcement_data.get('is_published', False)
             )
             session.add(game)
             session.commit()
@@ -182,13 +185,43 @@ class Database:
             raise e
         finally:
             session.close()
-    
+
+    def get_scheduled_games(self):
+        """Получение всех запланированных, но еще не опубликованных игр"""
+        session = self.get_session()
+        try:
+            return session.query(GameAnnouncement).filter(
+                GameAnnouncement.is_published == False,
+                GameAnnouncement.publication_date.isnot(None),
+                GameAnnouncement.publication_date > datetime.utcnow()
+            ).all()
+        finally:
+            session.close()
+
+    def mark_game_as_published(self, game_id, channel_message_id):
+        """Пометить игру как опубликованную"""
+        session = self.get_session()
+        try:
+            game = session.query(GameAnnouncement).filter(GameAnnouncement.id == game_id).first()
+            if game:
+                game.is_published = True
+                game.channel_message_id = channel_message_id
+                session.commit()
+                return True
+            return False
+        except Exception as e:
+            session.rollback()
+            raise e
+        finally:
+            session.close()
+
     def get_active_games(self):
-        """Получение активных анонсов игр (только будущие)"""
+        """Получение активных анонсов игр (только будущие и опубликованные)"""
         session = self.get_session()
         try:
             return session.query(GameAnnouncement).filter(
                 GameAnnouncement.is_active == True,
+                GameAnnouncement.is_published == True,  # Только опубликованные
                 GameAnnouncement.game_date >= datetime.utcnow()
             ).order_by(GameAnnouncement.game_date).all()
         finally:
@@ -202,11 +235,16 @@ class Database:
         finally:
             session.close()
     
-    def get_game_by_id(self, game_id):
-        """Получение игры по ID"""
+    def get_game_by_id(self, game_id, check_published=True):
+        """Получение игры по ID с опциональной проверкой публикации"""
         session = self.get_session()
         try:
-            return session.query(GameAnnouncement).filter(GameAnnouncement.id == game_id).first()
+            query = session.query(GameAnnouncement).filter(GameAnnouncement.id == game_id)
+            
+            if check_published:
+                query = query.filter(GameAnnouncement.is_published == True)
+                
+            return query.first()
         finally:
             session.close()
     
@@ -273,6 +311,7 @@ class Database:
                 max_players=template_data.get('max_players', 10),
                 template=template_data.get('template', 'standard'),
                 custom_text=template_data.get('custom_text'),
+                host=template_data.get('host', 'Не указан'),  # Новое поле
                 frequency=template_data['frequency'],
                 game_time=template_data['game_time'],
                 announcement_time=template_data['announcement_time'],
@@ -290,7 +329,7 @@ class Database:
             raise e
         finally:
             session.close()
-    
+
     def get_recurring_templates(self):
         """Получение всех активных шаблонов"""
         session = self.get_session()

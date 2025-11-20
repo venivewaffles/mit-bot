@@ -68,6 +68,9 @@ class GameAnnouncement(Base):
     custom_text = Column(Text)
     is_recurring = Column(Boolean, default=False)
     recurring_template_id = Column(Integer, ForeignKey('recurring_game_templates.id'))
+    host = Column(String(100))
+    publication_date = Column(DateTime)  # Когда опубликовать анонс
+    is_published = Column(Boolean, default=False)  # Опубликован ли анонс
     
     # Связь с записями
     registrations = relationship("GameRegistration", back_populates="game", cascade="all, delete-orphan")
@@ -113,6 +116,7 @@ class RecurringGameTemplate(Base):
     max_players = Column(Integer, default=10)
     template = Column(String(50), default='standard')
     custom_text = Column(Text)
+    host = Column(String(100))
     
     # Настройки расписания
     frequency = Column(SQLEnum(FrequencyType), nullable=False)
