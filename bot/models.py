@@ -122,6 +122,7 @@ class RecurringGameTemplate(Base):
     frequency = Column(SQLEnum(FrequencyType), nullable=False)
     game_time = Column(String(5), nullable=False)  # Формат "HH:MM"
     announcement_time = Column(String(5), nullable=False)  # Когда публиковать анонс
+    announcement_day_offset = Column(Integer, default=1)  # ДОБАВЛЕНО: за сколько дней публиковать анонс
     
     # Для еженедельных игр
     day_of_week = Column(Integer)  # 0-6 (понедельник-воскресенье)

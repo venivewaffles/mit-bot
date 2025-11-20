@@ -23,6 +23,108 @@ class RecurringGameManager:
         self.announcement_manager = announcement_manager
         self.logger = logging.getLogger(__name__)
     
+    async def create_next_game_from_template(self, template):
+        """Создание следующей игры из шаблона регулярной игры"""
+        try:
+            # Вычисляем дату следующей игры
+            next_game_date = self._calculate_next_game_date(template)
+            if not next_game_date:
+                return None
+            
+            # Проверяем, не создана ли уже игра на эту дату
+            existing_games = self.db.get_all_games()
+            for game in existing_games:
+                if (game.recurring_template_id == template.id and 
+                    game.game_date.date() == next_game_date.date()):
+                    self.logger.info(f"Игра для шаблона {template.id} на {next_game_date} уже существует")
+                    return None
+            
+            # Вычисляем дату публикации анонса
+            # ИСПРАВЛЕНИЕ: используем правильное имя поля
+            announcement_day_offset = getattr(template, 'announcement_day_offset', 1)
+            announcement_date = next_game_date - timedelta(days=announcement_day_offset)
+            announcement_time = datetime.strptime(template.announcement_time, '%H:%M').time()
+            publication_datetime = datetime.combine(announcement_date.date(), announcement_time)
+            
+            # Создаем игру
+            game_data = {
+                'title': template.title,
+                'description': template.description,
+                'game_date': next_game_date,
+                'location': template.location,
+                'max_players': template.max_players,
+                'created_by': template.created_by,
+                'template': template.template,
+                'is_recurring': True,
+                'recurring_template_id': template.id,
+                'host': template.host,
+                'publication_date': publication_datetime,
+                'is_published': False
+            }
+            
+            game = self.db.create_game_announcement(game_data)
+            
+            # Планируем публикацию
+            if publication_datetime > datetime.now():
+                self.announcement_manager.schedule_announcement_publication(game.id, publication_datetime)
+                self.logger.info(f"Запланирована публикация регулярной игры {game.id} на {publication_datetime}")
+            else:
+                # Если время публикации уже прошло, публикуем сразу
+                await self.announcement_manager._publish_announcement_direct(game)
+            
+            return game
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка при создании игры из шаблона {template.id}: {e}")
+            return None
+
+
+    def _calculate_next_game_date(self, template):
+        """Вычисление даты следующей игры для шаблона"""
+        now = datetime.now()
+        game_time = datetime.strptime(template.game_time, '%H:%M').time()
+        
+        if template.frequency == FrequencyType.DAILY:
+            # Ежедневно - следующий день
+            next_date = now + timedelta(days=1)
+            return datetime.combine(next_date.date(), game_time)
+        
+        elif template.frequency == FrequencyType.WEEKLY:
+            # Еженедельно - следующий указанный день недели
+            current_weekday = now.weekday()
+            days_ahead = template.day_of_week - current_weekday
+            if days_ahead <= 0:
+                days_ahead += 7
+            next_date = now + timedelta(days=days_ahead)
+            return datetime.combine(next_date.date(), game_time)
+        
+        elif template.frequency == FrequencyType.BIWEEKLY:
+            # Раз в 2 недели
+            current_weekday = now.weekday()
+            days_ahead = template.day_of_week - current_weekday
+            if days_ahead <= 0:
+                days_ahead += 14
+            next_date = now + timedelta(days=days_ahead)
+            return datetime.combine(next_date.date(), game_time)
+        
+        elif template.frequency == FrequencyType.MONTHLY:
+            # Ежемесячно - тот же день следующего месяца
+            next_month = now.month + 1
+            next_year = now.year
+            if next_month > 12:
+                next_month = 1
+                next_year += 1
+            
+            try:
+                next_date = datetime(next_year, next_month, now.day)
+            except ValueError:
+                # Если дня нет в следующем месяце, берем последний день
+                next_date = datetime(next_year, next_month + 1, 1) - timedelta(days=1)
+            
+            return datetime.combine(next_date.date(), game_time)
+        
+        return None
+    
     async def start_creation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Начало создания регулярной игры"""
         user_id = update.effective_user.id

@@ -311,10 +311,11 @@ class Database:
                 max_players=template_data.get('max_players', 10),
                 template=template_data.get('template', 'standard'),
                 custom_text=template_data.get('custom_text'),
-                host=template_data.get('host', 'Не указан'),  # Новое поле
+                host=template_data.get('host', 'Не указан'),
                 frequency=template_data['frequency'],
                 game_time=template_data['game_time'],
                 announcement_time=template_data['announcement_time'],
+                announcement_day_offset=template_data.get('announcement_day_offset', 1),  # ДОБАВЛЕНО
                 day_of_week=template_data.get('day_of_week'),
                 start_date=template_data['start_date'],
                 end_date=template_data.get('end_date'),

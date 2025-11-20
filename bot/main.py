@@ -6,6 +6,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from telegram import ReplyKeyboardRemove
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.cron import CronTrigger
 from datetime import datetime
 from .database import Database
 from .handlers import Handlers
@@ -201,6 +202,54 @@ class TelegramBot:
             self.game_manager.schedule_announcement_publication(game.id, game.publication_date)
             
         logging.info(f"Загружено {len(scheduled_games)} запланированных публикаций")
+        
+        # Запускаем задание для создания регулярных игр
+        self.scheduler.add_job(
+            self.create_recurring_games,
+            'cron',
+            hour=0,
+            minute=0,
+            id='create_recurring_games',
+            replace_existing=True
+        )
+        
+        # Запускаем задание для архивации старых игр
+        self.scheduler.add_job(
+            self.archive_old_games_daily,
+            'cron',
+            hour=1,
+            minute=0,
+            id='archive_old_games',
+            replace_existing=True
+        )
+    
+    async def create_recurring_games(self):
+        """Создание регулярных игр по шаблонам"""
+        try:
+            templates = self.db.get_recurring_templates()
+            created_count = 0
+            
+            for template in templates:
+                # Проверяем, нужно ли создать следующую игру для этого шаблона
+                next_game = await self.recurring_manager.create_next_game_from_template(template)
+                if next_game:
+                    created_count += 1
+                    logging.info(f"Создана регулярная игра {next_game.id} из шаблона {template.id}")
+            
+            if created_count > 0:
+                logging.info(f"Создано {created_count} регулярных игр")
+                
+        except Exception as e:
+            logging.error(f"Ошибка при создании регулярных игр: {e}")
+    
+    async def archive_old_games_daily(self):
+        """Ежедневное архивирование прошедших игр"""
+        try:
+            archived_count = self.db.archive_old_games()
+            if archived_count > 0:
+                logging.info(f"Автоматически архивировано {archived_count} прошедших игр")
+        except Exception as e:
+            logging.error(f"Ошибка при автоматическом архивировании: {e}")
     
     async def on_startup(self, application: Application):
         """Действия при запуске бота"""
@@ -210,6 +259,9 @@ class TelegramBot:
         # Запуск планировщика
         self.scheduler.start()
         logging.info("📅 Планировщик запущен")
+        
+        # Создаем регулярные игры при запуске
+        await self.create_recurring_games()
     
     async def on_shutdown(self, application: Application):
         """Действия при остановке бота"""

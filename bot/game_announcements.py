@@ -1,7 +1,6 @@
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ContextTypes, ConversationHandler
 from datetime import datetime, timedelta
-import re
 import os
 import logging
 from .templates import GameTemplates
@@ -15,7 +14,7 @@ class GameAnnouncementStates:
     TIME = 4
     HOST = 5
     FREQUENCY = 6
-    PUBLICATION_CHOICE = 7  # Новое состояние для выбора типа публикации
+    PUBLICATION_CHOICE = 7
     PUBLICATION_DATE = 8
     PUBLICATION_TIME = 9
     DAYS_BEFORE = 10
@@ -401,7 +400,14 @@ class GameAnnouncementManager:
                         template_data['day_of_week'] = announcement_data['game_date'].weekday()
                     
                     template = self.db.create_recurring_template(template_data)
-                    response_text = f"✅ Шаблон регулярной игры создан! (ID: {template.id})"
+                    
+                    # Создаем первую игру из шаблона
+                    first_game = await self._create_first_game_from_template(template)
+                    
+                    if first_game:
+                        response_text = f"✅ Шаблон регулярной игры создан! (ID: {template.id})\nПервая игра запланирована на {first_game.game_date.strftime('%d.%m.%Y %H:%M')}"
+                    else:
+                        response_text = f"✅ Шаблон регулярной игры создан! (ID: {template.id})"
                 
                 await update.message.reply_text(
                     response_text,
@@ -418,6 +424,99 @@ class GameAnnouncementManager:
             # Очищаем временные данные
             context.user_data.pop('game_announcement', None)
             return ConversationHandler.END
+
+    async def _create_first_game_from_template(self, template):
+        """Создание первой игры из шаблона регулярной игры"""
+        try:
+            # Вычисляем дату первой игры
+            game_date = self._calculate_next_game_date(template)
+            if not game_date:
+                return None
+            
+            # Вычисляем дату публикации анонса
+            # ИСПРАВЛЕНИЕ: используем правильное имя поля
+            announcement_day_offset = getattr(template, 'announcement_day_offset', 1)
+            announcement_date = game_date - timedelta(days=announcement_day_offset)
+            announcement_time = datetime.strptime(template.announcement_time, '%H:%M').time()
+            publication_datetime = datetime.combine(announcement_date.date(), announcement_time)
+            
+            # Создаем игру
+            game_data = {
+                'title': template.title,
+                'description': template.description,
+                'game_date': game_date,
+                'location': template.location,
+                'max_players': template.max_players,
+                'created_by': template.created_by,
+                'template': template.template,
+                'is_recurring': True,
+                'recurring_template_id': template.id,
+                'host': template.host,
+                'publication_date': publication_datetime,
+                'is_published': False
+            }
+            
+            game = self.db.create_game_announcement(game_data)
+            
+            # Планируем публикацию
+            if publication_datetime > datetime.now():
+                self.schedule_announcement_publication(game.id, publication_datetime)
+                self.logger.info(f"Запланирована публикация регулярной игры {game.id} на {publication_datetime}")
+            else:
+                # Если время публикации уже прошло, публикуем сразу
+                await self._publish_announcement_direct(game)
+            
+            return game
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка при создании первой игры из шаблона: {e}")
+            return None
+
+    def _calculate_next_game_date(self, template):
+        """Вычисление даты следующей игры для шаблона"""
+        now = datetime.now()
+        game_time = datetime.strptime(template.game_time, '%H:%M').time()
+        
+        if template.frequency == FrequencyType.DAILY:
+            # Ежедневно - следующий день
+            next_date = now + timedelta(days=1)
+            return datetime.combine(next_date.date(), game_time)
+        
+        elif template.frequency == FrequencyType.WEEKLY:
+            # Еженедельно - следующий указанный день недели
+            current_weekday = now.weekday()
+            days_ahead = template.day_of_week - current_weekday
+            if days_ahead <= 0:
+                days_ahead += 7
+            next_date = now + timedelta(days=days_ahead)
+            return datetime.combine(next_date.date(), game_time)
+        
+        elif template.frequency == FrequencyType.BIWEEKLY:
+            # Раз в 2 недели
+            current_weekday = now.weekday()
+            days_ahead = template.day_of_week - current_weekday
+            if days_ahead <= 0:
+                days_ahead += 14
+            next_date = now + timedelta(days=days_ahead)
+            return datetime.combine(next_date.date(), game_time)
+        
+        elif template.frequency == FrequencyType.MONTHLY:
+            # Ежемесячно - тот же день следующего месяца
+            next_month = now.month + 1
+            next_year = now.year
+            if next_month > 12:
+                next_month = 1
+                next_year += 1
+            
+            try:
+                next_date = datetime(next_year, next_month, now.day)
+            except ValueError:
+                # Если дня нет в следующем месяце, берем последний день
+                next_date = datetime(next_year, next_month + 1, 1) - timedelta(days=1)
+            
+            return datetime.combine(next_date.date(), game_time)
+        
+        return None
 
     def schedule_announcement_publication(self, game_id, publication_datetime):
         """Планирование публикации анонса"""
@@ -443,16 +542,14 @@ class GameAnnouncementManager:
         try:
             self.logger.info(f"Запуск запланированной публикации для игры {game_id}")
             
-            game = self.db.get_game_by_id(game_id)
+            # ИСПРАВЛЕНИЕ: Используем check_published=False чтобы найти неопубликованную игру
+            game = self.db.get_game_by_id(game_id, check_published=False)
             if not game:
                 self.logger.error(f"Игра {game_id} не найдена")
                 return
             
             # Публикуем анонс
             await self._publish_announcement_direct(game)
-            
-            # Помечаем как опубликованную
-            self.db.mark_game_as_published(game_id, game.channel_message_id)
             
             self.logger.info(f"Анонс игры {game_id} успешно опубликован по расписанию")
             
